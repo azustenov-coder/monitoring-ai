@@ -1,0 +1,4 @@
+__pycache__/
+ai_config.json
+ai_activity_log.txt
+*.pyc

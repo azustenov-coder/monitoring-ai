@@ -9,6 +9,9 @@ from tkinter import ttk, messagebox, simpledialog
 from datetime import datetime
 import hashlib
 import os
+import urllib.request
+import json
+import base64
 
 try:
     from PIL import Image, ImageTk
@@ -17,11 +20,206 @@ except ImportError:
     os.system(f"{sys.executable} -m pip install pillow")
     from PIL import Image, ImageTk
 
+# OpenCV and Numpy for face detection
+try:
+    import cv2
+    import numpy as np
+    cv2_available = True
+except ImportError:
+    import sys
+    print("[*] OpenCV yoki Numpy topilmadi. O'rnatilmoqda...")
+    os.system(f'"{sys.executable}" -m pip install opencv-python numpy')
+    try:
+        import cv2
+        import numpy as np
+        cv2_available = True
+        print("[+] OpenCV va Numpy muvaffaqiyatli o'rnatildi!")
+    except:
+        cv2_available = False
+        print("[-] OpenCV o'rnatib bo'lmadi, kamera tahlili o'chirildi.")
+
 # ── Sozlamalar ──────────────────────────────
 HOST       = '0.0.0.0'
 PORT       = 9999
 MAX_CLIENTS = 30
 # ────────────────────────────────────────────
+
+# ── AI Sozlamalari ──────────────────────────
+GEMINI_API_KEY = ""
+AI_MONITORING_ENABLED = False
+CONFIG_FILE = "ai_config.json"
+
+def load_ai_config():
+    global GEMINI_API_KEY, AI_MONITORING_ENABLED
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                GEMINI_API_KEY = data.get("api_key", "")
+                AI_MONITORING_ENABLED = data.get("monitoring_enabled", False)
+        except Exception as e:
+            print(f"Konfiguratsiyani yuklashda xato: {e}")
+
+def save_ai_config():
+    global GEMINI_API_KEY, AI_MONITORING_ENABLED
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump({
+                "api_key": GEMINI_API_KEY,
+                "monitoring_enabled": AI_MONITORING_ENABLED
+            }, f, indent=4)
+    except Exception as e:
+        print(f"Konfiguratsiyani saqlashda xato: {e}")
+
+# Load config immediately
+load_ai_config()
+
+# ── AI Helperlar ────────────────────────────
+def analyze_screenshot_with_gemini(api_key, image_bytes):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    
+    try:
+        b64_image = base64.b64encode(image_bytes).decode('utf-8')
+        prompt = (
+            "Siz o'quvchilar kompyuterlari ekranini nazorat qiluvchi AI yordamchisiz. "
+            "Skrinshotni tahlil qiling va o'quvchining ayni damdagi faoliyatini quyidagi toifalar bo'yicha aniqlang:\n"
+            "- Coding (Agar kod yozayotgan bo'lsa)\n"
+            "- Browsing (Agar darsga oid ma'lumot qidirayotgan bo'lsa)\n"
+            "- Social Media (Telegram, Instagram, va hk. darsga aloqasiz chatlar)\n"
+            "- Gaming (O'yinlar)\n"
+            "- Idle (Hech narsa ochilmagan yoki qimirlamay turgan bo'lsa)\n"
+            "- Other (Boshqa faoliyatlar)\n\n"
+            "O'quvchi dars bilan band bo'lsa 'on_task' ni true qiling, agar o'yin o'ynasa yoki chatda bo'lsa false qiling.\n"
+            "Quyidagi JSON formatda faqat to'g'ri JSON qaytaring (boshqa hech qanday izoh qo'shmang):\n"
+            "{\n"
+            "  \"activity\": \"Coding\" | \"Browsing\" | \"Social Media\" | \"Gaming\" | \"Idle\" | \"Other\",\n"
+            "  \"on_task\": true | false,\n"
+            "  \"summary\": \"O'zbek tilida juda qisqa (1 ta gap) tavsif. Masalan: 'VS Code da kod yozmoqda'\"\n"
+            "}"
+        )
+        
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inlineData": {
+                                "mimeType": "image/jpeg",
+                                "data": b64_image
+                            }
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json"
+            }
+        }
+        
+        req_data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(
+            url,
+            data=req_data,
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res_data = response.read().decode('utf-8')
+            res_json = json.loads(res_data)
+            text_response = res_json['candidates'][0]['content']['parts'][0]['text']
+            return json.loads(text_response.strip())
+    except Exception as e:
+        print(f"Gemini API xato: {e}")
+        return None
+
+def detect_faces(image_bytes):
+    if not cv2_available:
+        return None
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        cascade_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        
+        faces = face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=4,
+            minSize=(30, 30)
+        )
+        return len(faces)
+    except Exception as e:
+        print(f"Face detection xato: {e}")
+        return None
+
+def log_ai_activity(computer_name, result):
+    if not result:
+        return
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        activity = result.get('activity', 'Noma\'lum')
+        on_task = result.get('on_task', True)
+        summary = result.get('summary', '')
+        
+        status_str = "Darsda" if on_task else "Chalg'idi"
+        log_line = f"[{timestamp}] [{computer_name}] Faoliyat: {activity} ({status_str}) | Tavsif: {summary}\n"
+        
+        with open("ai_activity_log.txt", "a", encoding="utf-8") as f:
+            f.write(log_line)
+    except Exception as e:
+        print(f"Log yozishda xato: {e}")
+
+def run_gemini_analysis(cid, screen_bytes):
+    global GEMINI_API_KEY
+    try:
+        result = analyze_screenshot_with_gemini(GEMINI_API_KEY, screen_bytes)
+        with clients_lock:
+            if cid in clients:
+                c = clients[cid]
+                c['ai_analyzing'] = False
+                c['ai_screen_pending'] = False
+                c['last_ai_analysis'] = time.time()
+                if result:
+                    c['ai_status'] = result
+                    c['ai_error'] = None
+                    log_ai_activity(c['name'], result)
+                else:
+                    c['ai_error'] = "Tahlil qilib bo'lmadi"
+    except Exception as e:
+        print(f"Analysis Thread xato: {e}")
+        with clients_lock:
+            if cid in clients:
+                clients[cid]['ai_analyzing'] = False
+                clients[cid]['ai_error'] = str(e)
+
+def ai_worker_loop():
+    global AI_MONITORING_ENABLED, GEMINI_API_KEY
+    while True:
+        time.sleep(2)
+        if not AI_MONITORING_ENABLED or not GEMINI_API_KEY:
+            continue
+        
+        to_analyze = []
+        now = time.time()
+        with clients_lock:
+            for cid, c in clients.items():
+                last_analysis = c.get('last_ai_analysis', 0)
+                if (c.get('raw_screen_bytes') and 
+                    c.get('ai_screen_pending', False) and 
+                    (now - last_analysis > 20) and 
+                    not c.get('ai_analyzing', False)):
+                    
+                    to_analyze.append((cid, c['raw_screen_bytes']))
+                    c['ai_analyzing'] = True
+        
+        for cid, screen_bytes in to_analyze:
+            threading.Thread(target=run_gemini_analysis, args=(cid, screen_bytes), daemon=True).start()
 
 SHARED_SECRET = b"MonitoringAI_Secure_Key_2026"
 
@@ -118,12 +316,16 @@ def handle_client(conn, addr, cid):
                         c['screen']    = img.copy()
                         c['screen_updated'] = True
                         c['last_seen'] = datetime.now()
+                        c['raw_screen_bytes'] = payload
+                        c['ai_screen_pending'] = True
                     except: pass
                 elif mtype == 'CAMA':
                     try:
                         img = Image.open(io.BytesIO(payload))
                         c['camera']    = img.copy()
                         c['camera_updated'] = True
+                        if cv2_available:
+                            c['camera_faces'] = detect_faces(payload)
                     except: pass
 
     except Exception as e:
@@ -193,6 +395,9 @@ class App:
         self._build()
         self._tick()
 
+        # Start AI worker thread
+        threading.Thread(target=ai_worker_loop, daemon=True).start()
+
     # ── Layout ──────────────────────────────
     def _build(self):
         # Top bar
@@ -222,6 +427,9 @@ class App:
         tk.Button(bf, text="📢  XABAR YUBORISH",
                   bg='#b8860b', fg='white',
                   command=self.msg_all,    **BTN).pack(side='left', padx=4)
+        tk.Button(bf, text="⚙️  AI SOZLAMALARI",
+                  bg='#2a2a6e', fg='white',
+                  command=self.open_ai_settings, **BTN).pack(side='left', padx=4)
 
         tk.Label(bf, text="2× klik → to'liq  |  O'ng klik → menyu",
                  font=('Consolas', 9), bg='#0a0a1a', fg='#444466').pack(side='right', padx=10)
@@ -357,6 +565,11 @@ class App:
         img_lbl.pack(padx=2, pady=2)
 
         # Footer buttons
+        # Status Label (AI or camera detection info)
+        status_lbl = tk.Label(frame, text="⏳ Kutilmoqda...", font=('Consolas', 8, 'bold'),
+                              bg='#161630', fg='#aaaacc', height=2, wraplength=tw-10, justify='left', anchor='nw')
+        status_lbl.pack(fill='x', padx=6, pady=2)
+
         ft = tk.Frame(frame, bg='#161630')
         ft.pack(fill='x', padx=3, pady=3)
         bkw = dict(font=('Consolas', 8), relief='flat',
@@ -374,8 +587,9 @@ class App:
         img_lbl.bind('<Button-3>',
                      lambda e, c=cid: self.ctx_menu(e, c))
 
-        cards[cid] = {'frame': frame, 'img_lbl': img_lbl,
-                      'nlbl': nlbl, 'dot': dot, 'lbtn': lbtn, 'photo': None}
+        cards[cid] = {'frame': frame, 'hdr': hdr, 'img_lbl': img_lbl,
+                      'nlbl': nlbl, 'dot': dot, 'lbtn': lbtn, 'photo': None,
+                      'status_lbl': status_lbl, 'ft': ft}
         self._reposition(kind)
 
     def _del_card(self, cid, kind):
@@ -405,12 +619,18 @@ class App:
             else:
                 d['camera_updated'] = False
 
+            # AI and camera states
+            ai_status = d.get('ai_status', None)
+            ai_error = d.get('ai_error', None)
+            ai_analyzing = d.get('ai_analyzing', False)
+            camera_faces = d.get('camera_faces', None)
+
         icon = '🖥️' if kind == 'screen' else '📷'
         card['nlbl'].config(text=f"{icon} {name}")
 
         diff = (datetime.now() - ls).seconds
-        color = '#00ff88' if diff < 5 else '#ffcc00' if diff < 15 else '#ff4444'
-        card['dot'].config(fg=color)
+        dot_color = '#00ff88' if diff < 5 else '#ffcc00' if diff < 15 else '#ff4444'
+        card['dot'].config(fg=dot_color)
 
         if locked:
             card['lbtn'].config(text='🟢 OCHISH',   bg='#155a15',
@@ -418,6 +638,85 @@ class App:
         else:
             card['lbtn'].config(text='🔴 BLOKLASH', bg='#6b1515',
                                 command=lambda c=cid: self.lock_one(c))
+
+        # Update AI / camera status labels and card colors dynamically
+        bg_color = '#161630'
+        hdr_color = '#24245a'
+        text_fg = '#aaaacc'
+        status_text = "⏳ Kutilmoqda..."
+
+        if kind == 'screen':
+            if not AI_MONITORING_ENABLED:
+                status_text = "🤖 AI monitoring o'chirilgan"
+                bg_color = '#161630'
+                hdr_color = '#24245a'
+                text_fg = '#777799'
+            elif not GEMINI_API_KEY:
+                status_text = "⚠️ API Key kiritilmagan"
+                bg_color = '#161630'
+                hdr_color = '#24245a'
+                text_fg = '#ffcc00'
+            elif ai_analyzing:
+                status_text = "🤖 AI tahlil qilmoqda..."
+                bg_color = '#161630'
+                hdr_color = '#24245a'
+                text_fg = '#ffcc00'
+            elif ai_error:
+                status_text = f"❌ AI Xato:\n{ai_error}"
+                bg_color = '#161630'
+                hdr_color = '#24245a'
+                text_fg = '#ff4444'
+            elif ai_status:
+                activity = ai_status.get('activity', 'Noma\'lum')
+                on_task = ai_status.get('on_task', True)
+                summary = ai_status.get('summary', '')
+                status_text = f"🤖 {activity}\n💬 {summary}"
+                if on_task:
+                    bg_color = '#153b15'
+                    hdr_color = '#155a15'
+                    text_fg = '#00ff88'
+                else:
+                    bg_color = '#3b1515'
+                    hdr_color = '#6b1515'
+                    text_fg = '#ff4444'
+            else:
+                status_text = "⏳ Skrinshot kutilmoqda..."
+                bg_color = '#161630'
+                hdr_color = '#24245a'
+                text_fg = '#aaaacc'
+        else: # camera
+            if not cv2_available:
+                status_text = "📷 OpenCV o'rnatilmagan"
+                bg_color = '#161630'
+                hdr_color = '#24245a'
+                text_fg = '#777799'
+            elif camera_faces is None:
+                status_text = "⏳ Kamera tahlili kutilmoqda..."
+                bg_color = '#161630'
+                hdr_color = '#24245a'
+                text_fg = '#aaaacc'
+            elif camera_faces == 0:
+                status_text = "👤 O'rinda hech kim yo'q!"
+                bg_color = '#3b2b15'
+                hdr_color = '#6b5515'
+                text_fg = '#ffcc00'
+            elif camera_faces == 1:
+                status_text = "👤 1 ta odam faol (Joyida)"
+                bg_color = '#153b15'
+                hdr_color = '#155a15'
+                text_fg = '#00ff88'
+            else:
+                status_text = f"👥 {camera_faces} ta odam aniqlandi!\n(Ko'chirish ehtimoli)"
+                bg_color = '#3b1515'
+                hdr_color = '#6b1515'
+                text_fg = '#ff4444'
+
+        card['status_lbl'].config(text=status_text, fg=text_fg, bg=bg_color)
+        card['frame'].config(bg=bg_color)
+        card['ft'].config(bg=bg_color)
+        card['hdr'].config(bg=hdr_color)
+        card['nlbl'].config(bg=hdr_color)
+        card['dot'].config(bg=hdr_color)
 
         if img:
             # Only resize and update image on screen if there is a new frame or if first load
@@ -433,6 +732,49 @@ class App:
             label = "⏳ Screenshot kutilmoqda..." if kind=='screen' else "📷 Kamera kutilmoqda..."
             card['img_lbl'].config(text=label, fg='#444466',
                                    font=('Consolas', 9))
+
+    def open_ai_settings(self):
+        global GEMINI_API_KEY, AI_MONITORING_ENABLED
+        
+        win = tk.Toplevel(self.root)
+        win.title("⚙️ AI Nazorat Sozlamalari")
+        win.geometry("450x230")
+        win.configure(bg='#12122a')
+        win.resizable(False, False)
+        
+        win.transient(self.root)
+        win.grab_set()
+        
+        tk.Label(win, text="🤖 AI Nazorat Tizimi", font=('Consolas', 14, 'bold'), bg='#12122a', fg='#00d4ff').pack(pady=10)
+        
+        f_key = tk.Frame(win, bg='#12122a')
+        f_key.pack(fill='x', padx=20, pady=10)
+        tk.Label(f_key, text="Gemini API Key:", font=('Consolas', 10), bg='#12122a', fg='#aaaacc').pack(anchor='w')
+        
+        entry_key = tk.Entry(f_key, font=('Consolas', 10), bg='#1a1a3e', fg='white', insertbackground='white', bd=1, relief='flat')
+        entry_key.pack(fill='x', pady=5)
+        entry_key.insert(0, GEMINI_API_KEY)
+        
+        f_opts = tk.Frame(win, bg='#12122a')
+        f_opts.pack(fill='x', padx=20, pady=10)
+        
+        var_mon = tk.BooleanVar(value=AI_MONITORING_ENABLED)
+        cb_mon = tk.Checkbutton(f_opts, text="🤖 AI Skrinshot Tahlilini faollashtirish", variable=var_mon,
+                                font=('Consolas', 10), bg='#12122a', fg='white', selectcolor='#12122a',
+                                activebackground='#12122a', activeforeground='white')
+        cb_mon.pack(anchor='w', pady=5)
+        
+        def _save():
+            global GEMINI_API_KEY, AI_MONITORING_ENABLED
+            GEMINI_API_KEY = entry_key.get().strip()
+            AI_MONITORING_ENABLED = var_mon.get()
+            save_ai_config()
+            messagebox.showinfo("Muvaffaqiyatli", "AI sozlamalari saqlandi!", parent=win)
+            win.destroy()
+            
+        btn_save = tk.Button(win, text="SAQLASH", bg='#00875a', fg='white', font=('Consolas', 10, 'bold'),
+                             relief='flat', padx=20, pady=5, cursor='hand2', command=_save)
+        btn_save.pack(pady=15)
 
     # ── Full screen viewer ──────────────────
     def open_full(self, cid, kind='screen'):
@@ -455,6 +797,9 @@ class App:
                  font=('Consolas', 14, 'bold'),
                  bg='#12122a', fg='#00d4ff', pady=6).pack(fill='x')
 
+        info_lbl = tk.Label(win, text="", font=('Consolas', 12, 'bold'), bg='#12122a', fg='white', pady=8)
+        info_lbl.pack(fill='x', side='bottom')
+
         img_lbl = tk.Label(win, bg='#080818')
         img_lbl.pack(expand=True, fill='both')
 
@@ -463,12 +808,39 @@ class App:
             with clients_lock:
                 if cid not in clients:
                     win.destroy(); return
-                img = clients[cid]['screen'] if kind=='screen' \
-                      else clients[cid]['camera']
+                c = clients[cid]
+                img = c['screen'] if kind=='screen' else c['camera']
+                ai_status = c.get('ai_status', None)
+                camera_faces = c.get('camera_faces', None)
+
+            # Update info label status
+            if kind == 'screen':
+                if not AI_MONITORING_ENABLED:
+                    txt, clr = "AI monitoring o'chirilgan", "#aaaacc"
+                elif ai_status:
+                    on_task = ai_status.get('on_task', True)
+                    txt = f"🤖 Faoliyat: {ai_status.get('activity', '')} | 💬 {ai_status.get('summary', '')}"
+                    clr = "#00ff88" if on_task else "#ff4444"
+                else:
+                    txt, clr = "Mavjud ma'lumotlar yo'q", "#aaaacc"
+            else:
+                if not cv2_available:
+                    txt, clr = "OpenCV o'rnatilmagan", "#aaaacc"
+                elif camera_faces is None:
+                    txt, clr = "Kamera tahlili kutilmoqda...", "#aaaacc"
+                elif camera_faces == 0:
+                    txt, clr = "👤 O'rinda hech kim yo'q!", "#ffcc00"
+                elif camera_faces == 1:
+                    txt, clr = "👤 1 ta odam faol (Joyida)", "#00ff88"
+                else:
+                    txt, clr = f"👥 {camera_faces} ta odam aniqlandi! (Ko'chirish ehtimoli)", "#ff4444"
+
+            info_lbl.config(text=txt, fg=clr)
+
             if img:
                 try:
                     w = win.winfo_width() - 20
-                    h = win.winfo_height() - 90
+                    h = win.winfo_height() - 150
                     if w > 0 and h > 0:
                         ri = img.copy(); ri.thumbnail((w,h), Image.LANCZOS)
                         ph = ImageTk.PhotoImage(ri)

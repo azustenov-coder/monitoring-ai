@@ -28,7 +28,7 @@ except ImportError:
 # =============================================
 # SOZLAMALAR - BU YERNI O'ZGARTIRING
 # =============================================
-SERVER_IP   = "192.168.1.172"   # <-- Admin kompyuteri IP
+SERVER_IP   = "127.0.0.1"   # <-- Admin kompyuteri IP
 SERVER_PORT = 9999
 SCREEN_INTERVAL  = 3    # Ekran screenshot (sekund)
 CAMERA_INTERVAL  = 2    # Kamera (sekund)
