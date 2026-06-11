@@ -10,6 +10,7 @@ from datetime import datetime
 import hashlib
 import os
 import urllib.request
+import urllib.error
 import json
 import base64
 
@@ -76,63 +77,80 @@ load_ai_config()
 
 # ── AI Helperlar ────────────────────────────
 def analyze_screenshot_with_gemini(api_key, image_bytes):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-    
-    try:
-        b64_image = base64.b64encode(image_bytes).decode('utf-8')
-        prompt = (
-            "Siz o'quvchilar kompyuterlari ekranini nazorat qiluvchi AI yordamchisiz. "
-            "Skrinshotni tahlil qiling va o'quvchining ayni damdagi faoliyatini quyidagi toifalar bo'yicha aniqlang:\n"
-            "- Coding (Agar kod yozayotgan bo'lsa)\n"
-            "- Browsing (Agar darsga oid ma'lumot qidirayotgan bo'lsa)\n"
-            "- Social Media (Telegram, Instagram, va hk. darsga aloqasiz chatlar)\n"
-            "- Gaming (O'yinlar)\n"
-            "- Idle (Hech narsa ochilmagan yoki qimirlamay turgan bo'lsa)\n"
-            "- Other (Boshqa faoliyatlar)\n\n"
-            "O'quvchi dars bilan band bo'lsa 'on_task' ni true qiling, agar o'yin o'ynasa yoki chatda bo'lsa false qiling.\n"
-            "Quyidagi JSON formatda faqat to'g'ri JSON qaytaring (boshqa hech qanday izoh qo'shmang):\n"
-            "{\n"
-            "  \"activity\": \"Coding\" | \"Browsing\" | \"Social Media\" | \"Gaming\" | \"Idle\" | \"Other\",\n"
-            "  \"on_task\": true | false,\n"
-            "  \"summary\": \"O'zbek tilida juda qisqa (1 ta gap) tavsif. Masalan: 'VS Code da kod yozmoqda'\"\n"
-            "}"
-        )
-        
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt},
-                        {
-                            "inlineData": {
-                                "mimeType": "image/jpeg",
-                                "data": b64_image
+    # Try gemini-2.5-flash first, fallback to gemini-1.5-flash
+    models = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    last_err = ""
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        try:
+            b64_image = base64.b64encode(image_bytes).decode('utf-8')
+            prompt = (
+                "Siz foydalanuvchilar kompyuterlari ekranini nazorat qiluvchi AI yordamchisiz. "
+                "Skrinshotni tahlil qiling va foydalanuvchining ayni damdagi faoliyatini quyidagi toifalar bo'yicha aniqlang:\n"
+                "- Coding (Agar kod yozayotgan bo'lsa)\n"
+                "- Browsing (Agar darsga oid ma'lumon qidirayotgan bo'lsa)\n"
+                "- Social Media (Telegram, Instagram, va hk. darsga aloqasiz chatlar)\n"
+                "- Gaming (O'yinlar)\n"
+                "- Idle (Hech narsa ochilmagan yoki qimirlamay turgan bo'lsa)\n"
+                "- Other (Boshqa faoliyatlar)\n\n"
+                "Foydalanuvchi dars/ish bilan band bo'lsa 'on_task' ni true qiling, agar o'yin o'ynasa yoki chatda bo'lsa false qiling.\n"
+                "Quyidagi JSON formatda faqat to'g'ri JSON qaytaring (boshqa hech qanday izoh qo'shmang):\n"
+                "{\n"
+                "  \"activity\": \"Coding\" | \"Browsing\" | \"Social Media\" | \"Gaming\" | \"Idle\" | \"Other\",\n"
+                "  \"on_task\": true | false,\n"
+                "  \"summary\": \"O'zbek tilida juda qisqa (1 ta gap) tavsif. Masalan: 'VS Code da kod yozmoqda'\"\n"
+                "}"
+            )
+            
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": prompt},
+                            {
+                                "inlineData": {
+                                    "mimeType": "image/jpeg",
+                                    "data": b64_image
+                                }
                             }
-                        }
-                    ]
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "responseMimeType": "application/json"
                 }
-            ],
-            "generationConfig": {
-                "responseMimeType": "application/json"
             }
-        }
-        
-        req_data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(
-            url,
-            data=req_data,
-            headers={'Content-Type': 'application/json'},
-            method='POST'
-        )
-        
-        with urllib.request.urlopen(req, timeout=10) as response:
-            res_data = response.read().decode('utf-8')
-            res_json = json.loads(res_data)
-            text_response = res_json['candidates'][0]['content']['parts'][0]['text']
-            return json.loads(text_response.strip())
-    except Exception as e:
-        print(f"Gemini API xato: {e}")
-        return None
+            
+            req_data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(
+                url,
+                data=req_data,
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_data = response.read().decode('utf-8')
+                res_json = json.loads(res_data)
+                text_response = res_json['candidates'][0]['content']['parts'][0]['text']
+                return json.loads(text_response.strip()), None
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode('utf-8')
+                err_json = json.loads(err_body)
+                err_msg = err_json.get('error', {}).get('message', str(e))
+            except:
+                err_msg = str(e)
+            last_err = f"API error ({model}): {err_msg}"
+            print(f"Gemini API HTTP xato: {last_err}")
+            # If it is an API key error, no need to try other models
+            if "API_KEY_INVALID" in last_err or "API key not valid" in last_err:
+                return None, "API Key noto'g'ri (API Key is invalid)"
+        except Exception as e:
+            last_err = f"Xato ({model}): {str(e)}"
+            print(f"Gemini API umumiy xato: {last_err}")
+            
+    return None, last_err
 
 def detect_faces(image_bytes):
     if not cv2_available:
@@ -178,7 +196,7 @@ def log_ai_activity(computer_name, result):
 def run_gemini_analysis(cid, screen_bytes):
     global GEMINI_API_KEY
     try:
-        result = analyze_screenshot_with_gemini(GEMINI_API_KEY, screen_bytes)
+        result, err = analyze_screenshot_with_gemini(GEMINI_API_KEY, screen_bytes)
         with clients_lock:
             if cid in clients:
                 c = clients[cid]
@@ -190,7 +208,7 @@ def run_gemini_analysis(cid, screen_bytes):
                     c['ai_error'] = None
                     log_ai_activity(c['name'], result)
                 else:
-                    c['ai_error'] = "Tahlil qilib bo'lmadi"
+                    c['ai_error'] = err or "Tahlil qilib bo'lmadi"
     except Exception as e:
         print(f"Analysis Thread xato: {e}")
         with clients_lock:
@@ -309,7 +327,18 @@ def handle_client(conn, addr, cid):
                     break
                 c = clients[cid]
                 if mtype == 'NAME':
-                    c['name']      = payload.decode('utf-8', errors='ignore').strip()
+                    new_name = payload.decode('utf-8', errors='ignore').strip()
+                    c['name'] = new_name
+                    # Duplicate (eski ulanish) bor-yo'qligini tekshirish va uni o'chirish
+                    to_disconnect = []
+                    for old_cid, old_c in list(clients.items()):
+                        if old_cid != cid and old_c.get('name') == new_name:
+                            to_disconnect.append((old_cid, old_c['socket']))
+                    for old_cid, old_sock in to_disconnect:
+                        try: old_sock.close()
+                        except: pass
+                        if old_cid in clients:
+                            del clients[old_cid]
                 elif mtype == 'SCRN':
                     try:
                         img = Image.open(io.BytesIO(payload))
@@ -430,6 +459,9 @@ class App:
         tk.Button(bf, text="⚙️  AI SOZLAMALARI",
                   bg='#2a2a6e', fg='white',
                   command=self.open_ai_settings, **BTN).pack(side='left', padx=4)
+        tk.Button(bf, text="🔄  YANGILASH",
+                  bg='#117a8b', fg='white',
+                  command=self.manual_refresh, **BTN).pack(side='left', padx=4)
 
         tk.Label(bf, text="2× klik → to'liq  |  O'ng klik → menyu",
                  font=('Consolas', 9), bg='#0a0a1a', fg='#444466').pack(side='right', padx=10)
@@ -579,6 +611,8 @@ class App:
         lbtn.pack(side='left', padx=2)
         tk.Button(ft, text='💬', bg='#3a3a00', fg='#ffcc00',
                   command=lambda c=cid: self.msg_one(c), **bkw).pack(side='left', padx=2)
+        tk.Button(ft, text='🗑️', bg='#4a1515', fg='#ff4444',
+                  command=lambda c=cid: self.delete_client(c), **bkw).pack(side='left', padx=2)
         tk.Button(ft, text='🔍', bg='#003a3a', fg='#00ffff',
                   command=lambda c=cid, k=kind: self.open_full(c, k), **bkw).pack(side='right', padx=2)
 
@@ -889,6 +923,7 @@ class App:
         else:
             m.add_command(label="🔴  Bloklash", command=lambda: self.lock_one(cid))
         m.add_command(label="💬  Xabar",         command=lambda: self.msg_one(cid))
+        m.add_command(label="🗑️  O'chirish",      command=lambda: self.delete_client(cid))
         try: m.tk_popup(event.x_root, event.y_root)
         finally: m.grab_release()
 
@@ -920,10 +955,42 @@ class App:
         if msg: send_command(cid, 'MSGS', msg.encode('utf-8'))
 
     def msg_all(self):
-        msg = simpledialog.askstring("Xabar", "Barcha o'quvchilarga:", parent=self.root)
+        msg = simpledialog.askstring("Xabar", "Barcha foydalanuvchilarga:", parent=self.root)
         if msg:
             with clients_lock: ids = list(clients.keys())
             for cid in ids: send_command(cid, 'MSGS', msg.encode('utf-8'))
+
+    def delete_client(self, cid):
+        with clients_lock:
+            if cid in clients:
+                name = clients[cid]['name']
+                sock = clients[cid]['socket']
+            else:
+                return
+        
+        if messagebox.askyesno("Tasdiqlash", f"{name}ni paneldan o'chirib tashlaysizmi?\n(Agar client foydalanuvchida hali ham ishlayotgan bo'lsa, u qayta ulanishi mumkin)"):
+            try: sock.close()
+            except: pass
+            with clients_lock:
+                if cid in clients:
+                    del clients[cid]
+
+    def manual_refresh(self):
+        # 1. Close and remove clients that haven't been seen for more than 30 seconds (dead sockets)
+        now = datetime.now()
+        to_remove = []
+        with clients_lock:
+            for cid, c in list(clients.items()):
+                if (now - c['last_seen']).seconds > 30:
+                    to_remove.append(cid)
+                    try: c['socket'].close()
+                    except: pass
+            for cid in to_remove:
+                if cid in clients:
+                    del clients[cid]
+        
+        # 2. Call _refresh to update UI immediately
+        self._refresh()
 
 
 # ══════════════ MAIN ════════════════════════
